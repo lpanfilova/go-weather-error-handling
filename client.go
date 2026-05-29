@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 )
@@ -11,6 +12,10 @@ func getWeather(clientURL string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 500 {
+		return "", errors.New("Server is unavailable: status code 500")
+	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
