@@ -11,6 +11,7 @@ import (
 )
 
 type responseConfig struct {
+	statusCode        int
 	responseBody      string
 	retryAfter        string
 	includeRetryAfter bool
@@ -27,13 +28,8 @@ func (s *SpySleeper) Sleep(duration time.Duration) {
 }
 
 type respSequenceServer struct {
-	respSeq  []int
-	reqCount int
-	config   responseConfig
-}
-
-func (s *respSequenceServer) Inc() {
-	s.reqCount++
+	statuses     []responseConfig
+	requestCount int
 }
 
 func TestGetWeather(t *testing.T) {
@@ -41,15 +37,13 @@ func TestGetWeather(t *testing.T) {
 		sleeper := &SpySleeper{}
 
 		serverState := &respSequenceServer{
-			respSeq:  []int{http.StatusOK},
-			reqCount: 0,
-			config: responseConfig{
-				responseBody:      "sunny",
-				retryAfter:        "",
-				includeRetryAfter: false,
-			},
+			statuses: []responseConfig{{
+				statusCode:   http.StatusOK,
+				responseBody: "sunny",
+			}},
+			requestCount: 0,
 		}
-		server := makeConfigurableServer(serverState)
+		server := makeConfigurableServer(t, serverState)
 		defer server.Close()
 
 		want := "sunny"
@@ -59,7 +53,7 @@ func TestGetWeather(t *testing.T) {
 		}
 
 		assertWeatherString(t, got, want)
-		assertNumRequests(t, serverState.reqCount, 1)
+		assertNumRequests(t, serverState.requestCount, 1)
 	})
 
 	t.Run("handles non-retryable errors", func(t *testing.T) {
@@ -87,15 +81,13 @@ func TestGetWeather(t *testing.T) {
 			t.Run(tt.name, func(t *testing.T) {
 				sleeper := &SpySleeper{}
 				serverState := &respSequenceServer{
-					respSeq:  []int{tt.serverResponse},
-					reqCount: 0,
-					config: responseConfig{
-						responseBody:      tt.weather,
-						retryAfter:        "",
-						includeRetryAfter: false,
-					},
+					statuses: []responseConfig{{
+						statusCode:   tt.serverResponse,
+						responseBody: tt.weather,
+					}},
+					requestCount: 0,
 				}
-				server := makeConfigurableServer(serverState)
+				server := makeConfigurableServer(t, serverState)
 				defer server.Close()
 
 				got, err := getWeather(server.URL, sleeper)
@@ -106,52 +98,40 @@ func TestGetWeather(t *testing.T) {
 				apiErr := requireAPIError(t, err)
 				assertWeatherString(t, got, tt.want)
 				assertStatusCode(t, apiErr.StatusCode, tt.serverResponse)
+				assertNumRequests(t, serverState.requestCount, 1)
 			})
 		}
 	})
 
 	t.Run("handles 429 retry responses", func(t *testing.T) {
 		retryTests := []struct {
-			name             string
-			weather          string
-			wantSleepSeconds int
-			config           responseConfig
+			name              string
+			retryAfter        string
+			includeRetryAfter bool
+			wantSleepSeconds  int
 		}{
 			{
-				name:             "uses Retry-After when valid",
-				weather:          "rainy",
-				wantSleepSeconds: 4,
-				config: responseConfig{
-					responseBody:      "rainy",
-					retryAfter:        "4",
-					includeRetryAfter: true},
+				name:              "uses Retry-After when valid",
+				retryAfter:        "4",
+				includeRetryAfter: true,
+				wantSleepSeconds:  4,
 			},
 			{
-				name:             "uses default delay when Retry-After is invalid",
-				weather:          "rainy",
-				wantSleepSeconds: 2,
-				config: responseConfig{
-					responseBody:      "rainy",
-					retryAfter:        "invalid",
-					includeRetryAfter: true},
+				name:              "uses default delay when Retry-After is invalid",
+				retryAfter:        "invalid",
+				includeRetryAfter: true,
+				wantSleepSeconds:  2,
 			},
 			{
-				name:             "uses default delay when Retry-After is empty",
-				weather:          "rainy",
-				wantSleepSeconds: 2,
-				config: responseConfig{
-					responseBody:      "rainy",
-					retryAfter:        "",
-					includeRetryAfter: true},
+				name:              "uses default delay when Retry-After is empty",
+				retryAfter:        "",
+				includeRetryAfter: true,
+				wantSleepSeconds:  2,
 			},
 			{
-				name:             "uses default delay when Retry-After is absent",
-				weather:          "rainy",
-				wantSleepSeconds: 2,
-				config: responseConfig{
-					responseBody:      "rainy",
-					retryAfter:        "",
-					includeRetryAfter: false},
+				name:              "uses default delay when Retry-After is absent",
+				includeRetryAfter: false,
+				wantSleepSeconds:  2,
 			},
 		}
 
@@ -160,22 +140,33 @@ func TestGetWeather(t *testing.T) {
 				requiredSleep := time.Duration(tt.wantSleepSeconds) * time.Second
 				sleeper := &SpySleeper{}
 
-				serverState := &respSequenceServer{
-					respSeq:  []int{429, 200},
-					reqCount: 0,
-					config:   tt.config,
+				responses := []responseConfig{
+					{
+						statusCode:        http.StatusTooManyRequests,
+						retryAfter:        tt.retryAfter,
+						includeRetryAfter: tt.includeRetryAfter,
+					},
+					{
+						statusCode:   http.StatusOK,
+						responseBody: "rainy",
+					},
 				}
-				server := makeConfigurableServer(serverState)
+
+				serverState := &respSequenceServer{
+					statuses:     responses,
+					requestCount: 0,
+				}
+
+				server := makeConfigurableServer(t, serverState)
 				defer server.Close()
 
-				want := tt.weather
-				got, err := getWeather(server.URL, sleeper)
+				_, err := getWeather(server.URL, sleeper)
 				if err != nil {
 					t.Fatalf("client failed to retry: %v", err)
 				}
 
 				assertTimeSlept(t, sleeper.lastSleepDuration, requiredSleep)
-				assertWeatherString(t, got, want)
+				assertNumRequests(t, serverState.requestCount, 2)
 			})
 		}
 	})
@@ -184,16 +175,14 @@ func TestGetWeather(t *testing.T) {
 		totalRequiredSleep := time.Duration(2*maxRetryCount) * time.Second
 		sleeper := &SpySleeper{}
 
-		serverState := &respSequenceServer{
-			respSeq:  []int{429, 429, 429, 429, 429},
-			reqCount: 0,
-			config: responseConfig{
-				responseBody:      "",
-				retryAfter:        "2",
-				includeRetryAfter: true,
-			},
+		config := responseConfig{
+			statusCode:        429,
+			responseBody:      "",
+			retryAfter:        "2",
+			includeRetryAfter: true,
 		}
-		server := makeConfigurableServer(serverState)
+		serverState := &respSequenceServer{statuses: []responseConfig{config, config, config, config}}
+		server := makeConfigurableServer(t, serverState)
 		defer server.Close()
 
 		want := ""
@@ -204,20 +193,28 @@ func TestGetWeather(t *testing.T) {
 
 		apiErr := requireAPIError(t, err)
 		assertStatusCode(t, apiErr.StatusCode, http.StatusTooManyRequests)
-		assertNumRequests(t, serverState.reqCount, 4)
 		assertTimeSlept(t, sleeper.totalTimeSlept, totalRequiredSleep)
 		assertWeatherString(t, got, want)
+		assertNumRequests(t, serverState.requestCount, 4)
 	})
 }
 
-func makeConfigurableServer(s *respSequenceServer) *httptest.Server {
+func makeConfigurableServer(t testing.TB, s *respSequenceServer) *httptest.Server {
+	t.Helper()
+
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.config.includeRetryAfter {
-			w.Header().Set("Retry-After", s.config.retryAfter)
+		if s.requestCount >= len(s.statuses) {
+			t.Fatalf("unexpected extra request")
 		}
-		w.WriteHeader(s.respSeq[s.reqCount])
-		w.Write([]byte(s.config.responseBody))
-		s.Inc()
+
+		response := s.statuses[s.requestCount]
+		s.requestCount++
+
+		if response.includeRetryAfter {
+			w.Header().Set("Retry-After", response.retryAfter)
+		}
+		w.WriteHeader(response.statusCode)
+		w.Write([]byte(response.responseBody))
 	}))
 }
 
