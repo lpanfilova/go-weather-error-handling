@@ -131,7 +131,7 @@ func TestGetWeather(t *testing.T) {
 				requiredSleep := time.Duration(tt.wantSleepSeconds) * time.Second
 				sleeper := &SpySleeper{}
 
-				server := makeRetryServer(tt.config)
+				server := makeRetryServerThenOk(tt.config)
 				defer server.Close()
 
 				want := tt.weather
@@ -145,6 +145,29 @@ func TestGetWeather(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("handles infinite 429 retry responses", func(t *testing.T) {
+		totalRequiredSleep := time.Duration(2*maxRetryCount) * time.Second
+		sleeper := &SpySleeper{}
+
+		server := makeInfiniteRetryServer(retryServerConfig{
+			responseBody:      "",
+			retryAfter:        "2",
+			includeRetryAfter: true,
+		})
+		defer server.Close()
+
+		want := ""
+		got, err := getWeather(server.URL, sleeper)
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+
+		assertTime(t, sleeper.totalTimeSlept, totalRequiredSleep)
+		assertWeatherString(t, got, want)
+		apiErr := requireAPIError(t, err)
+		assertStatusCode(t, apiErr.StatusCode, http.StatusTooManyRequests)
+	})
 }
 
 func makeServer(body string, status int) *httptest.Server {
@@ -154,7 +177,7 @@ func makeServer(body string, status int) *httptest.Server {
 	}))
 }
 
-func makeRetryServer(config retryServerConfig) *httptest.Server {
+func makeRetryServerThenOk(config retryServerConfig) *httptest.Server {
 	requestCount := 0
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +193,13 @@ func makeRetryServer(config retryServerConfig) *httptest.Server {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(config.responseBody))
+	}))
+}
+
+func makeInfiniteRetryServer(config retryServerConfig) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", config.retryAfter)
+		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 }
 

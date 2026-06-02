@@ -11,6 +11,9 @@ import (
 )
 
 const defaultRetryAfter = 2
+const maxRetryCount = 3
+
+const maxAttempts = maxRetryCount + 1
 
 type APIError struct {
 	StatusCode int
@@ -32,40 +35,52 @@ func (*DefaultSleeper) Sleep(duration time.Duration) {
 }
 
 func getWeather(clientURL string, sleeper Sleeper) (string, error) {
-
-	resp, err := http.Get(clientURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		bodyBytes, err := io.ReadAll(resp.Body)
+	for i := range maxAttempts {
+		resp, err := http.Get(clientURL)
 		if err != nil {
 			return "", err
 		}
-		return string(bodyBytes), nil
+		defer resp.Body.Close()
 
-	case http.StatusInternalServerError:
-		return "", &APIError{
-			StatusCode: resp.StatusCode,
-			StatusText: http.StatusText(resp.StatusCode),
-		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return "", err
+			}
+			return string(bodyBytes), nil
 
-	case http.StatusTooManyRequests:
-		seconds, err := strconv.Atoi(resp.Header.Get("Retry-After"))
-		if err != nil {
-			seconds = defaultRetryAfter
-		}
-		timeToWait := time.Duration(seconds) * time.Second
-		sleeper.Sleep(timeToWait)
-		return getWeather(clientURL, sleeper)
+		case http.StatusInternalServerError:
+			return "", &APIError{
+				StatusCode: resp.StatusCode,
+				StatusText: http.StatusText(resp.StatusCode),
+			}
 
-	default:
-		return "", &APIError{
-			StatusCode: resp.StatusCode,
-			StatusText: http.StatusText(resp.StatusCode),
+		case http.StatusTooManyRequests:
+
+			if i == maxAttempts-1 {
+				return "", &APIError{
+					StatusCode: resp.StatusCode,
+					StatusText: http.StatusText(resp.StatusCode),
+				}
+			}
+
+			seconds, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+			if err != nil {
+				seconds = defaultRetryAfter
+			}
+			timeToWait := time.Duration(seconds) * time.Second
+			sleeper.Sleep(timeToWait)
+			resp.Body.Close()
+			continue
+
+		default:
+			return "", &APIError{
+				StatusCode: resp.StatusCode,
+				StatusText: http.StatusText(resp.StatusCode),
+			}
 		}
 	}
+
+	return "", fmt.Errorf("retry loop exited unexpectedly after %d attempts", maxAttempts)
 }
