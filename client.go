@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const defaultRetryAfter = 2
+
 type APIError struct {
 	StatusCode int
 	StatusText string
@@ -54,7 +56,7 @@ func getWeather(clientURL string, sleeper Sleeper) (string, error) {
 	case http.StatusTooManyRequests:
 		seconds, err := strconv.Atoi(resp.Header.Get("Retry-After"))
 		if err != nil {
-			return "", err
+			seconds = defaultRetryAfter
 		}
 		timeToWait := time.Duration(seconds) * time.Second
 		sleeper.Sleep(timeToWait)
