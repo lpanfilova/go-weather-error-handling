@@ -34,13 +34,16 @@ func (*DefaultSleeper) Sleep(duration time.Duration) {
 	time.Sleep(duration)
 }
 
-func getWeather(clientURL string, sleeper Sleeper) (string, error) {
+type Clock interface {
+	Now() time.Time
+}
+
+func getWeather(clientURL string, sleeper Sleeper, clock Clock) (string, error) {
 	for i := range maxAttempts {
 		resp, err := http.Get(clientURL)
 		if err != nil {
 			return "", err
 		}
-		defer resp.Body.Close()
 
 		switch resp.StatusCode {
 		case http.StatusOK:
@@ -48,9 +51,11 @@ func getWeather(clientURL string, sleeper Sleeper) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			resp.Body.Close()
 			return string(bodyBytes), nil
 
 		case http.StatusInternalServerError:
+			resp.Body.Close()
 			return "", &APIError{
 				StatusCode: resp.StatusCode,
 				StatusText: http.StatusText(resp.StatusCode),
@@ -59,22 +64,34 @@ func getWeather(clientURL string, sleeper Sleeper) (string, error) {
 		case http.StatusTooManyRequests:
 
 			if i == maxAttempts-1 {
+				resp.Body.Close()
 				return "", &APIError{
 					StatusCode: resp.StatusCode,
 					StatusText: http.StatusText(resp.StatusCode),
 				}
 			}
 
-			seconds, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+			retryHeaderString := resp.Header.Get("Retry-After")
+			seconds, err := strconv.Atoi(retryHeaderString)
 			if err != nil {
-				seconds = defaultRetryAfter
+				parsedTime, err := time.Parse(http.TimeFormat, retryHeaderString)
+				if err != nil {
+					seconds = defaultRetryAfter
+				} else {
+					seconds = int(parsedTime.Sub(clock.Now()) / time.Second)
+					if seconds < 0 {
+						seconds = 0
+					}
+				}
 			}
+
 			timeToWait := time.Duration(seconds) * time.Second
 			sleeper.Sleep(timeToWait)
 			resp.Body.Close()
 			continue
 
 		default:
+			resp.Body.Close()
 			return "", &APIError{
 				StatusCode: resp.StatusCode,
 				StatusText: http.StatusText(resp.StatusCode),

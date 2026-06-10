@@ -27,6 +27,14 @@ func (s *SpySleeper) Sleep(duration time.Duration) {
 	s.totalTimeSlept += duration
 }
 
+type FixedClock struct {
+	now time.Time
+}
+
+func (c *FixedClock) Now() time.Time {
+	return c.now
+}
+
 type respSequenceServer struct {
 	statuses     []responseConfig
 	requestCount int
@@ -35,6 +43,7 @@ type respSequenceServer struct {
 func TestGetWeather(t *testing.T) {
 	t.Run("returns weather when server responds 200 OK", func(t *testing.T) {
 		sleeper := &SpySleeper{}
+		clock := &FixedClock{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 
 		serverState := &respSequenceServer{
 			statuses: []responseConfig{{
@@ -47,7 +56,7 @@ func TestGetWeather(t *testing.T) {
 		defer server.Close()
 
 		want := "sunny"
-		got, err := getWeather(server.URL, sleeper)
+		got, err := getWeather(server.URL, sleeper, clock)
 		if err != nil {
 			t.Fatalf("failed to call server: %v", err)
 		}
@@ -80,6 +89,7 @@ func TestGetWeather(t *testing.T) {
 		for _, tt := range errorTests {
 			t.Run(tt.name, func(t *testing.T) {
 				sleeper := &SpySleeper{}
+				clock := &FixedClock{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 				serverState := &respSequenceServer{
 					statuses: []responseConfig{{
 						statusCode:   tt.serverResponse,
@@ -90,7 +100,7 @@ func TestGetWeather(t *testing.T) {
 				server := makeConfigurableServer(t, serverState)
 				defer server.Close()
 
-				got, err := getWeather(server.URL, sleeper)
+				got, err := getWeather(server.URL, sleeper, clock)
 				if err == nil {
 					t.Fatal("expected an error, got nil")
 				}
@@ -104,6 +114,8 @@ func TestGetWeather(t *testing.T) {
 	})
 
 	t.Run("handles 429 retry responses", func(t *testing.T) {
+		clock := &FixedClock{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+
 		retryTests := []struct {
 			name              string
 			retryAfter        string
@@ -133,6 +145,12 @@ func TestGetWeather(t *testing.T) {
 				includeRetryAfter: false,
 				wantSleepSeconds:  2,
 			},
+			{
+				name:              "parses Retry-After when field is in DateTime format",
+				retryAfter:        clock.Now().UTC().Add(time.Duration(7) * time.Second).Format(http.TimeFormat),
+				includeRetryAfter: true,
+				wantSleepSeconds:  7,
+			},
 		}
 
 		for _, tt := range retryTests {
@@ -160,7 +178,7 @@ func TestGetWeather(t *testing.T) {
 				server := makeConfigurableServer(t, serverState)
 				defer server.Close()
 
-				_, err := getWeather(server.URL, sleeper)
+				_, err := getWeather(server.URL, sleeper, clock)
 				if err != nil {
 					t.Fatalf("client failed to retry: %v", err)
 				}
@@ -171,9 +189,10 @@ func TestGetWeather(t *testing.T) {
 		}
 	})
 
-	t.Run("handles infinite 429 retry responses", func(t *testing.T) {
+	t.Run("stops after max retries with 429 response", func(t *testing.T) {
 		totalRequiredSleep := time.Duration(2*maxRetryCount) * time.Second
 		sleeper := &SpySleeper{}
+		clock := &FixedClock{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 
 		config := responseConfig{
 			statusCode:        429,
@@ -186,7 +205,7 @@ func TestGetWeather(t *testing.T) {
 		defer server.Close()
 
 		want := ""
-		got, err := getWeather(server.URL, sleeper)
+		got, err := getWeather(server.URL, sleeper, clock)
 		if err == nil {
 			t.Fatal("expected an error, got nil")
 		}
